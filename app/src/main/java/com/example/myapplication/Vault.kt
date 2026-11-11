@@ -79,24 +79,37 @@ class Vault(context: Context) {
         Result.ERROR
     }
 
-    private fun unlockReady(pw: String): Result {
-        val salt = Crypto.unb64(sp.getString("kdf_salt", null) ?: return Result.ERROR)
+    /** Returns the data key if [pw] is right, null if wrong. */
+    private fun openWrap(pw: String): SecretKey? {
+        val salt = Crypto.unb64(sp.getString("kdf_salt", null) ?: return null)
         val iter = sp.getInt("kdf_iter", Crypto.KDF_ITER)
-        val wrapped = Crypto.unb64(sp.getString("wrap_pw", null) ?: return Result.ERROR)
-        val dekBytes = try {
-            Crypto.open(Crypto.deriveKey(pw, salt, iter), wrapped)
+        val wrapped = Crypto.unb64(sp.getString("wrap_pw", null) ?: return null)
+        return try {
+            SecretKeySpec(Crypto.open(Crypto.deriveKey(pw, salt, iter), wrapped), "AES")
         } catch (e: java.security.GeneralSecurityException) {
-            return Result.WRONG
+            null
         }
-        val dek = SecretKeySpec(dekBytes, "AES")
+    }
+
+    private fun unlockReady(pw: String): Result {
+        val dek = openWrap(pw) ?: return Result.WRONG
         // Upgrade older, weaker settings on a correct login
-        if (iter < Crypto.KDF_ITER) {
+        if (sp.getInt("kdf_iter", Crypto.KDF_ITER) < Crypto.KDF_ITER) {
             val ed = sp.edit()
             putPasswordWrap(ed, pw, dek)
             ed.commit()
         }
         Session.dataKey = dek
         return Result.OK
+    }
+
+    /** Re-wraps the same data key with a new password. Data and fingerprint stay valid. */
+    fun changePassword(oldPw: String, newPw: String): Result {
+        if (state() != State.READY) return Result.ERROR
+        val dek = openWrap(oldPw) ?: return Result.WRONG
+        val ed = sp.edit()
+        putPasswordWrap(ed, newPw, dek)
+        return if (ed.commit()) Result.OK else Result.ERROR
     }
 
     /** Old version (Keystore-key encryption + stored hash) -> new password-derived design. */

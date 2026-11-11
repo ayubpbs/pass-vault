@@ -12,6 +12,10 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -67,11 +71,7 @@ class MainActivity : AppCompatActivity() {
         etSearch.doAfterTextChanged { applyFilter() }
         findViewById<ExtendedFloatingActionButton>(R.id.fabAdd)
             .setOnClickListener { showEditor(null) }
-        findViewById<Button>(R.id.btnBackup).setOnClickListener { askBackupPassword() }
-        findViewById<Button>(R.id.btnRestore).setOnClickListener {
-            picking = true
-            importLauncher.launch(arrayOf("*/*"))
-        }
+        findViewById<Button>(R.id.btnSettings).setOnClickListener { showSettings() }
     }
 
     override fun onStart() {
@@ -99,6 +99,153 @@ class MainActivity : AppCompatActivity() {
             .sortedBy { it.name.lowercase() }
         adapter.submit(shown)
         tvEmpty.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
+    }
+
+    // ---------------- Settings ----------------
+
+    private fun canUseBiometric() =
+        BiometricManager.from(this).canAuthenticate(BIOMETRIC_STRONG) ==
+                BiometricManager.BIOMETRIC_SUCCESS
+
+    private fun showSettings() {
+        val items = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+
+        items.add("Change password")
+        actions.add { askChangePassword() }
+
+        if (canUseBiometric()) {
+            val on = vault.bioEnrolled()
+            items.add(if (on) "Fingerprint unlock: ON (tap to turn off)" else "Fingerprint unlock: OFF (tap to turn on)")
+            actions.add {
+                if (on) {
+                    vault.clearBio()
+                    Toast.makeText(this, "Fingerprint unlock turned off", Toast.LENGTH_SHORT).show()
+                } else {
+                    enableBiometric()
+                }
+            }
+        }
+
+        items.add("Backup")
+        actions.add { askBackupPassword() }
+
+        items.add("Restore")
+        actions.add {
+            picking = true
+            importLauncher.launch(arrayOf("*/*"))
+        }
+
+        items.add("Lock now")
+        actions.add {
+            Session.lock()
+            startActivity(Intent(this, LockActivity::class.java))
+            finish()
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Settings")
+            .setItems(items.toTypedArray()) { _, i -> actions[i]() }
+            .show()
+    }
+
+    private fun enableBiometric() {
+        val cipher = try {
+            Crypto.bioEncryptCipher()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Fingerprint is not available", Toast.LENGTH_LONG).show()
+            return
+        }
+        picking = true
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    picking = false
+                    try {
+                        result.cryptoObject?.cipher?.let { vault.storeBioWrap(it) }
+                        Toast.makeText(this@MainActivity, "Fingerprint unlock turned on", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        vault.clearBio()
+                        Toast.makeText(this@MainActivity, "Could not turn on fingerprint", Toast.LENGTH_LONG).show()
+                    }
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    picking = false
+                }
+            })
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Turn on fingerprint unlock")
+            .setNegativeButtonText("Cancel")
+            .setAllowedAuthenticators(BIOMETRIC_STRONG)
+            .build()
+        prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+    }
+
+    private fun askChangePassword() {
+        val v = layoutInflater.inflate(R.layout.dialog_change_pw, null)
+        val tilOld = v.findViewById<TextInputLayout>(R.id.tilOldPw)
+        val tilNew = v.findViewById<TextInputLayout>(R.id.tilNewPw)
+        val tilNew2 = v.findViewById<TextInputLayout>(R.id.tilNewPw2)
+        val etOld = v.findViewById<EditText>(R.id.etOldPw)
+        val etNew = v.findViewById<EditText>(R.id.etNewPw)
+        val etNew2 = v.findViewById<EditText>(R.id.etNewPw2)
+
+        val d = MaterialAlertDialogBuilder(this)
+            .setTitle("Change password")
+            .setView(v)
+            .setPositiveButton("Change", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+        d.window?.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE
+        )
+        d.show()
+        val btn = d.getButton(AlertDialog.BUTTON_POSITIVE)
+        btn.setOnClickListener {
+            val old = etOld.text.toString()
+            val np = etNew.text.toString()
+            tilOld.error = null
+            tilNew.error = null
+            tilNew2.error = null
+            val wait = vault.lockRemainingMs()
+            when {
+                wait > 0 -> tilOld.error = "Too many wrong attempts. Try again in ${(wait + 999) / 1000}s"
+                old.isEmpty() -> tilOld.error = "Enter your current password"
+                np.length < Vault.MIN_PASSWORD -> tilNew.error = "At least ${Vault.MIN_PASSWORD} characters"
+                np != etNew2.text.toString() -> tilNew2.error = "Passwords do not match"
+                np == old -> tilNew.error = "Choose a different password"
+                else -> {
+                    btn.isEnabled = false
+                    Thread {
+                        val r = try {
+                            vault.changePassword(old, np)
+                        } catch (e: Exception) {
+                            Vault.Result.ERROR
+                        }
+                        runOnUiThread {
+                            btn.isEnabled = true
+                            when (r) {
+                                Vault.Result.OK -> {
+                                    vault.resetFailures()
+                                    Toast.makeText(this, "Password changed", Toast.LENGTH_LONG).show()
+                                    d.dismiss()
+                                }
+                                Vault.Result.WRONG -> {
+                                    vault.recordFailure()
+                                    tilOld.error = "Wrong password"
+                                }
+                                Vault.Result.ERROR ->
+                                    Toast.makeText(this, "Could not change password", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }.start()
+                }
+            }
+        }
     }
 
     // ---------------- Backup / Restore ----------------
