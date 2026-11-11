@@ -89,7 +89,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         // Lock whenever the app goes to background
-        if (!isChangingConfigurations && !picking) Session.unlocked = false
+        if (!isChangingConfigurations && !picking) Session.lock()
     }
 
     private fun applyFilter() {
@@ -129,7 +129,7 @@ class MainActivity : AppCompatActivity() {
             tilPw.error = null
             tilConfirm.error = null
             when {
-                p.length < 6 -> tilPw.error = "At least 6 characters"
+                p.length < Vault.MIN_PASSWORD -> tilPw.error = "At least ${Vault.MIN_PASSWORD} characters (use a long passphrase)"
                 p != etConfirm.text.toString() -> tilConfirm.error = "Passwords do not match"
                 else -> {
                     pendingBackupPw = p
