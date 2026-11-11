@@ -1,8 +1,8 @@
-name: Build APK
+name: Build signed APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -17,14 +17,38 @@ jobs:
           java-version: 17
 
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew
+      - name: Check signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::Add the KEYSTORE_BASE64 and KEYSTORE_PASSWORD secrets (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
+      - name: Build release APK (fixed signing key)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          gradle assembleRelease \
+            -Pandroid.injected.signing.store.file="$RUNNER_TEMP/release.keystore" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias=passvault \
+            -Pandroid.injected.signing.key.password="$KEYSTORE_PASSWORD"
+          rm -f "$RUNNER_TEMP/release.keystore"
+
+      - name: Make sure the APK is signed
+        run: |
+          ls -l app/build/outputs/apk/release/
+          test -f app/build/outputs/apk/release/app-release.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: PassVault-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
